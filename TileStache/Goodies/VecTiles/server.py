@@ -128,7 +128,7 @@ class Provider:
         Note that JSON requires keys to be strings, therefore the zoom levels
         must be enclosed in quotes.
     '''
-    def __init__(self, layer, dbinfo, queries, clip=True, srid=900913, simplify=1.0, simplify_until=16, padding=0):
+    def __init__(self, layer, dbinfo, queries, clip=True, srid=900913, simplify=1.0, simplify_until=16, padding=0, order_by=None, limit=None):
         '''
         '''
         self.layer = layer
@@ -142,6 +142,8 @@ class Provider:
         self.simplify_until = int(simplify_until)
         self.padding = int(padding)
         self.columns = {}
+        self.order_by = order_by
+        self.limit = limit
 
         # Each type creates an iterator yielding tuples of:
         # (zoom level (int), query (string))
@@ -196,7 +198,7 @@ class Provider:
 
         tolerance = self.simplify * tolerances[coord.zoom] if coord.zoom < self.simplify_until else None
         
-        return Response(self.dbinfo, self.srid, query, self.columns[query], bounds, tolerance, coord.zoom, self.clip, coord, self.layer.name(), self.padding)
+        return Response(self.dbinfo, self.srid, query, self.columns[query], bounds, tolerance, coord.zoom, self.clip, coord, self.layer.name(), self.padding, self.order_by, self.limit)
 
     def getTypeByExtension(self, extension):
         ''' Get mime-type and format by file extension, one of "mvt", "json", "topojson" or "pbf".
@@ -279,7 +281,7 @@ class Connection:
 class Response:
     '''
     '''
-    def __init__(self, dbinfo, srid, subquery, columns, bounds, tolerance, zoom, clip, coord, layer_name='', padding=0):
+    def __init__(self, dbinfo, srid, subquery, columns, bounds, tolerance, zoom, clip, coord, layer_name='', padding=0, order_by=None, limit=None):
         ''' Create a new response object with Postgres connection info and a query.
         
             bounds argument is a 4-tuple with (xmin, ymin, xmax, ymax).
@@ -291,6 +293,8 @@ class Response:
         self.coord = coord
         self.layer_name = layer_name
         self.padding = padding
+        self.order_by = order_by
+        self.limit = limit
 
         # convert pixel padding to meters (based on tolerances)
         # to be applied in the bbox
@@ -298,9 +302,9 @@ class Response:
         tol_val = tolerances[tol_idx]
         self.padding = self.padding * tol_val
 
-        geo_query = build_query(srid, subquery, columns, bounds, tolerance, True, clip, self.padding)
-        merc_query = build_query(srid, subquery, columns, bounds, tolerance, False, clip, self.padding)
-        pbf_query = build_query(srid, subquery, columns, bounds, tolerance, False, clip, self.padding, pbf.extents)
+        geo_query = build_query(srid, subquery, columns, bounds, tolerance, True, clip, self.padding, order_by=self.order_by, limit=self.limit)
+        merc_query = build_query(srid, subquery, columns, bounds, tolerance, False, clip, self.padding, order_by=self.order_by, limit=self.limit)
+        pbf_query = build_query(srid, subquery, columns, bounds, tolerance, False, clip, self.padding, pbf.extents, order_by=self.order_by, limit=self.limit)
         self.query = dict(TopoJSON=geo_query, JSON=geo_query, MVT=merc_query, PBF=pbf_query)
 
     def save(self, out, format):
@@ -456,7 +460,7 @@ def get_features(dbinfo, query, n_try=1):
     return features
 
         
-def build_query(srid, subquery, subcolumns, bounds, tolerance, is_geo, is_clipped, padding=0, scale=None):
+def build_query(srid, subquery, subcolumns, bounds, tolerance, is_geo, is_clipped, padding=0, scale=None, order_by=None, limit=None):
     ''' Build and return an PostGIS query.
     '''
     bbox = 'ST_MakeBox2D(ST_MakePoint(%.12f, %.12f), ST_MakePoint(%.12f, %.12f))' % (
@@ -493,12 +497,18 @@ def build_query(srid, subquery, subcolumns, bounds, tolerance, is_geo, is_clippe
     
     columns = ', '.join(columns)
     
-    return '''SELECT %(columns)s,
+    query = '''SELECT %(columns)s,
                      ST_AsBinary(%(geom)s) AS __geometry__
-              FROM (
-                %(subquery)s
-                ) AS q
-              WHERE ST_IsValid(q.__geometry__)
-                AND q.__geometry__ && %(bbox)s
+               FROM (
+                 %(subquery)s
+                 ) AS q
+               WHERE ST_IsValid(q.__geometry__)
+                 AND q.__geometry__ && %(bbox)s
                 AND ST_Intersects(q.__geometry__, %(bbox)s)''' \
             % locals()
+    if order_by:
+        query += f'\nORDER BY {order_by}'
+    if limit:
+        query += f'\nLIMIT {int(limit)}'
+    
+    return query
